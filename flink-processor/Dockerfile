@@ -13,7 +13,7 @@ RUN apt-get update \
   && apt-get install -y java-21-amazon-corretto-jdk 
 
 # Build MobilityDB with MEOS
-RUN git clone https://github.com/MobilityDB/MobilityDB.git -b stable-1.1 /usr/local/src/MobilityDB
+RUN git clone https://github.com/MobilityDB/MobilityDB.git -b stable-1.2 /usr/local/src/MobilityDB
 RUN mkdir -p /usr/local/src/MobilityDB/build 
 RUN cd /usr/local/src/MobilityDB/build && \
     cmake -DMEOS=ON .. && \
