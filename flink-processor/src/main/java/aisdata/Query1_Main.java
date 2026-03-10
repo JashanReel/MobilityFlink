@@ -58,7 +58,7 @@ import functions.error_handler_fn;
  *       here we use AIS vessel data from Danish waters (January 2021) as a substitute dataset.</li>
  *   <li><b>Line 2 (edwithin_tgeo_geo)</b>: Called inside {@link HighRiskZoneWindowFunction#process}
  *       for each event against each predefined hazard zone polygon (INPolygons). The distance
- *       threshold is set to 500 m for the AIS dataset (the paper uses 20 m for SNCB trains -
+ *       threshold is set to 500 m for the AIS dataset (the paper uses 20 m for SNCB trains,
  *       see {@link #ALERT_DISTANCE_METERS}).</li>
  *   <li><b>Line 3 (10-second tumbling window)</b>: Implemented with
  *       {@code TumblingEventTimeWindows.of(Time.seconds(10))}, using the AIS message timestamp
@@ -82,7 +82,7 @@ import functions.error_handler_fn;
  *       {@code edwithin_tgeo_geo}. <b>CRASH.</b></li>
  *   <li>{@code tgeogpoint_in} + {@code geog_from_hexewkb(hex)}: Both types are SRID=4326
  *       geography, distances computed in metres. Works, but requires pre-encoding polygons
- *       as EWKB hex strings - verbose and error-prone. <b>CORRECT but complex.</b></li>
+ *       as EWKB hex strings, which are verbose and error-prone. <b>CORRECT but complex.</b></li>
  *   <li>{@code tgeogpoint_in} + {@code geog_in("POLYGON(...)", -1)} ← <b>current approach</b>:
  *       {@code geog_in} is the geography counterpart of {@code geom_in}. Both the vessel point and the zone polygon are
  *       SRID=4326 geography types. <b>CORRECT and simplest.</b></li>
@@ -120,13 +120,12 @@ public class Query1_Main {
      * <i>"Any incoming temporal point within the specified distance of 20 meters"</i>.
      *
      * <p>This value is set to <b>500 metres</b> here because the AIS vessel dataset covers
-     * open sea areas where exact polygon placement is less precise. Change back to {@code 20.0}
-     * when deploying against the real SNCB train stream.
+     * open sea areas where exact polygon placement is less precise.
      */
     private static final double ALERT_DISTANCE_METERS = 500.0;
 
     /**
-     * Predefined high-risk area polygons - the <b>INPolygons</b> referenced in paper Line 2:
+     * Predefined high-risk area polygons --> the <b>INPolygons</b> referenced in paper Line 2:
      * <i>"invoking edwithin_tgeo_geo on the SNCB stream against predefined high-risk area
      * polygons (INPolygons)"</i>.
      *
@@ -136,7 +135,7 @@ public class Query1_Main {
      *
      * <p>In the paper, INPolygons represent dangerous zones alongside SNCB railway lines.
      * Here they are placed over the known cluster positions of vessels in the AIS test dataset
-     * (Danish waters, January 2021) to produce meaningful alerts with the substitute data.
+     * (Danish waters, January 2021) to produce alerts with the substitute data.
      * Each polygon is a rectangular bounding box (5 coordinates, first = last to close the ring)
      * built around a representative position observed in {@code ais_instants.csv}.
      *
@@ -148,16 +147,16 @@ public class Query1_Main {
      */
     private static final String[] HIGH_RISK_ZONES_WKT = {
 
-            // ZONE 1 - Kattegat Traffic Separation Scheme
+            // ZONE 1
             "POLYGON((12.2524 57.0390, 12.2524 57.0790, 12.2924 57.0790, 12.2924 57.0390, 12.2524 57.0390))",
 
-            // ZONE 2 - Limfjord / Aalborg harbour approach
+            // ZONE 2
             "POLYGON((9.9555 57.5720, 9.9555 57.6120, 9.9955 57.6120, 9.9955 57.5720, 9.9555 57.5720))",
 
-            // ZONE 3 - Great Belt (Store Baelt) eastern narrows
+            // ZONE 3
             "POLYGON((11.9900 55.9200, 11.9900 55.9600, 12.0800 55.9600, 12.0800 55.9200, 11.9900 55.9200))",
 
-            // ZONE 4 - North Sea approach near Esbjerg
+            // ZONE 4
             "POLYGON((4.4800 55.5500, 4.4800 55.6600, 4.6400 55.6600, 4.6400 55.5500, 4.4800 55.5500))"
     };
 
@@ -217,7 +216,7 @@ public class Query1_Main {
             //   keyBy(getMmsi)          → paper Line 1: partitions the stream per vessel so that
             //                             each window contains events from a single MMSI only.
             //   window(Tumbling 10s)    → paper Line 3: groups events into non-overlapping
-            //                             10-second event-time buckets.
+            //                             10-second event-time windows.
             //   process(WindowFunction) → paper Line 2: calls edwithin_tgeo_geo for each event
             //                             against each INPolygon; emits alerts on match.
             //   print()                 → paper Line 4: equivalent to PrintSinkDescriptor.
@@ -264,6 +263,12 @@ public class Query1_Main {
         private final String[] zoneWkt;
         private final double distanceMeters;
 
+        // Parse the INPolygons only once per worker.
+        // geog_in(wkt, -1) creates a geography type (SRID=4326), so
+        // edwithin_tgeo_geo computes distances geodetically in metres - consistent
+        // with the tgeogpoint created below via tgeogpoint_in.
+        private transient Pointer[] hazardZones;
+
         private transient error_handler_fn errorHandler;
 
         private static final DateTimeFormatter TIMESTAMP_FMT =
@@ -274,14 +279,21 @@ public class Query1_Main {
             this.distanceMeters = distanceMeters;
         }
 
-        /** Initialises the MEOS library for this operator instance. */
+        /** Initialises the MEOS library and the hazard zones for this operator instance. */
         @Override
         public void open(Configuration parameters) throws Exception {
             super.open(parameters);
             errorHandler = new error_handler();
             functions.meos_initialize_timezone("UTC");
             functions.meos_initialize_error_handler(errorHandler);
-            log.info("MEOS initialized in HighRiskZoneWindowFunction.open()");
+            this.hazardZones = new Pointer[zoneWkt.length];
+            for (int i = 0; i < zoneWkt.length; i++) {
+                hazardZones[i] = functions.geog_in(zoneWkt[i], -1);
+                if (hazardZones[i] == null) {
+                    log.error("geog_in returned null for ZONE {}", i + 1);
+                }
+            }
+            log.info("MEOS initialized in HighRiskZoneWindowFunction.open(), {} hazard zones parsed", hazardZones.length);
         }
 
         /**
@@ -313,17 +325,6 @@ public class Query1_Main {
                 Iterable<AISData> elements,
                 Collector<String> out) {
 
-            // Parse the INPolygons once per window invocation.
-            // geog_in(wkt, -1) creates a geography type (SRID=4326), so
-            // edwithin_tgeo_geo computes distances geodetically in metres - consistent
-            // with the tgeogpoint created below via tgeogpoint_in.
-            Pointer[] hazardZones = new Pointer[zoneWkt.length];
-            for (int i = 0; i < zoneWkt.length; i++) {
-                hazardZones[i] = functions.geog_in(zoneWkt[i], -1);
-                if (hazardZones[i] == null) {
-                    log.error("geog_in returned null for ZONE {}", i + 1);
-                }
-            }
 
             String windowStart = millisToTimestamp(context.window().getStart());
             String windowEnd   = millisToTimestamp(context.window().getEnd());
