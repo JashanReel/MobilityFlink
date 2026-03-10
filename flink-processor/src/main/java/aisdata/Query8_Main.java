@@ -411,17 +411,17 @@ public class Query8_Main {
          * <ol>
          *   <li><b>Predict</b>: "Where should the vessel be, based solely on the motion model?"
          *       <ul>
-         *         <li>{@code x_pred = A × x}  (apply: new_pos = old_pos + velocity × dt)</li>
-         *         <li>{@code P_pred = A × P × Aᵀ + Q}  (uncertainty grows: model is imperfect)</li>
+         *         <li>{@code x_pred}  (apply: new_pos = old_pos + velocity × dt)</li>
+         *         <li>{@code P_pred}  (uncertainty grows: model is imperfect)</li>
          *       </ul>
          *   </li>
          *   <li>"The GPS just gave a new measurement: how do we update?"
          *       <ul>
-         *         <li>Compute innovation: {@code innov = z − H × x_pred} (GPS minus prediction)</li>
-         *         <li>Compute Kalman Gain: {@code K = P_pred × Hᵀ × S⁻¹}
+         *         <li>Compute innovation: {@code innov} (GPS minus prediction)</li>
+         *         <li>Compute Kalman Gain: {@code K}
          *             (how much to trust the GPS vs. the model)</li>
-         *         <li>Correct state: {@code x_corr = x_pred + K × innov} (weighted average)</li>
-         *         <li>Reduce uncertainty: {@code P_corr = (I − K×H) × P_pred}</li>
+         *         <li>Correct state: {@code x_corr}</li>
+         *         <li>Reduce uncertainty: {@code P_corr</li>
          *       </ul>
          *   </li>
          * </ol>
@@ -625,19 +625,15 @@ public class Query8_Main {
                     // kf.correct(zArr) performs three internal calculations:
                     //
                     //   1. Kalman Gain K (4×2):
-                    //        K = P_pred × Hᵀ × S⁻¹
                     //      K is the "trust cursor" between model and GPS:
                     //        - Large P_pred (uncertain prediction) → large K → trust GPS more.
                     //        - Large R (noisy GPS) → small S⁻¹ → small K → trust model more.
                     //      K values are between 0 (ignore GPS) and 1 (fully trust GPS).
                     //
-                    //   2. State correction:
-                    //        x_corr = x_pred + K × innov
+                    //   2. State correction
                     //
-                    //   3. Covariance update:
-                    //        P_corr = (I − K×H) × P_pred
-                    //      Incorporating a measurement reduces uncertainty.
-                    //      (I − K×H) ≤ I element-wise, so P_corr < P_pred.
+                    //   3. Covariance update
+                    //       Incorporating a measurement reduces uncertainty
                     kf.correct(zArr);
 
                     double[] xCorr = kf.getStateEstimation();
