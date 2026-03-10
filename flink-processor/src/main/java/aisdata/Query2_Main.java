@@ -55,10 +55,10 @@ import functions.error_handler_fn;
  * <p>The original MobilityNebula pseudocode is:
  * <pre>
  *   Query::from(GPS)
- *     .filter(eintersects_tgeo_geo(lon, lat, ts, INPolygons) == 0) // Line 2 - exclude maintenance areas
- *     .window(SlidingWindow::of(EventTime(ts), Seconds(10), Milliseconds(10))) // Line 3 - sliding window
- *     .apply(variation(FA), variation(FF))                          // Line 4 - pressure variance
- *     .filter(varFA > 0.6 && varFF <= 0.5);                        // Line 5 - brake anomaly filter
+ *     .filter(eintersects_tgeo_geo(lon, lat, ts, INPolygons) == 0)                // Line 2 - exclude maintenance areas
+ *     .window(SlidingWindow::of(EventTime(ts), Seconds(10), Milliseconds(10)))    // Line 3 - sliding window
+ *     .apply(variation(FA), variation(FF))                                        // Line 4 - pressure variance
+ *     .filter(varFA > 0.6 && varFF <= 0.5);                                       // Line 5 - brake anomaly filter
  * </pre>
  *
  * <p><b>Mapping to this implementation:</b>
@@ -70,9 +70,7 @@ import functions.error_handler_fn;
  *       points that are inside a zone rather than alerting on proximity.</li>
  *   <li><b>Line 3 (sliding window 10s / 10ms)</b>: Implemented with
  *       {@code SlidingEventTimeWindows.of(Time.seconds(10), Time.milliseconds(10))}. A 10ms
- *       step produces approximately 1000 overlapping windows per second. Note that with AIS
- *       data at ~1 message/second, most windows will contain a single event; with the SNCB
- *       dataset at higher frequency this produces more meaningful variance estimates.</li>
+ *       step produces approximately 1000 overlapping windows per second.</li>
  *   <li><b>Line 4 (variation(FA), variation(FF))</b>: The {@code variation} operator computes
  *       statistical variance (E[X²] − E[X]²) over the window. MEOS does not expose a
  *       {@code variation} function in its Java bindings, so the variance is computed
@@ -93,8 +91,7 @@ import functions.error_handler_fn;
  *       via {@code course / 360.0 * 7.0}. Course changes introduce variation analogous to FF.</li>
  * </ul>
  * The thresholds {@link #VAR_FA_THRESHOLD} and {@link #VAR_FF_THRESHOLD} have been tuned
- * accordingly (see constants). Change FA/FF extraction and thresholds when using the real
- * SNCB dataset.
+ * accordingly (see constants).
  *
  * <p><b>HOW TO RUN</b>
  * <br>In the Dockerfile, change the entrypoint from {@code aisdata.Main} to
@@ -115,15 +112,11 @@ public class Query2_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query2_Main.class);
 
-    // -----------------------------------------------------------------------
-    // Configuration
-    // -----------------------------------------------------------------------
-
     /**
      * Variance threshold for FA (brake pipe pressure) in bar².
      *
      * <p>The paper condition is {@code varFA > 0.6}. Applied here to the speed-derived
-     * FA proxy. Tune this value when switching to the real SNCB pressure data.
+     * FA proxy.
      */
     private static final double VAR_FA_THRESHOLD = 0.6;
 
@@ -131,7 +124,7 @@ public class Query2_Main {
      * Variance threshold for FF (fictitious brake cylinder pressure) in bar².
      *
      * <p>The paper condition is {@code varFF <= 0.5}. Applied here to the course-derived
-     * FF proxy. Tune this value when switching to the real SNCB pressure data.
+     * FF proxy.
      */
     private static final double VAR_FF_THRESHOLD = 0.5;
 
@@ -142,7 +135,7 @@ public class Query2_Main {
     private static final double MAX_SPEED_KNOTS = 25.0;
 
     /**
-     * Maintenance area exclusion polygons — the <b>INPolygons</b> referenced in paper Line 2:
+     * Maintenance area exclusion polygons - the <b>INPolygons</b> referenced in paper Line 2:
      * <i>"filters the SNCB stream to include only points that are not in a maintenance area
      * (INPolygons), by applying the function eintersects_tgeo_geo"</i>.
      *
@@ -151,7 +144,7 @@ public class Query2_Main {
      *
      * <p>In the paper these represent railway maintenance depots where brake monitoring is
      * not meaningful. Here they are placed in open sea areas away from the vessel clusters
-     * in {@code ais_instants.csv} so that virtually no AIS event is excluded — preserving
+     * in {@code ais_instants.csv} so that virtually no AIS event is excluded, preserving
      * data volume for the variance computation demonstration.
      *
      * <p>To observe the exclusion filter in action, move a polygon to overlap a vessel cluster
@@ -247,13 +240,13 @@ public class Query2_Main {
     // -----------------------------------------------------------------------
 
     /**
-     * Computes the statistical variance of a list of values: E[X²] − E[X]².
+     * Computes the statistical variance of a list of values.
      *
      * <p>This is the Java implementation of the {@code variation} operator from the paper
      * (Line 4). MEOS does not expose a {@code variation} function in its Java bindings, so
      * the computation is performed directly here.
      *
-     * Formula : ([(val - avg)^2] for each val) / number_of_val
+     * Formula : Sigma([(val - avg)^2] for each val) / number_of_val
      *
      * @param values sample values within one window (e.g. FA or FF readings)
      * @return variance in the same unit² as the input (bar² for the SNCB dataset), or
@@ -263,7 +256,7 @@ public class Query2_Main {
         if (values.size() < 2) return 0.0;
         double mean = values.stream().mapToDouble(Double::doubleValue).average().orElse(0.0);
         double sumSq = values.stream().mapToDouble(v -> (v - mean) * (v - mean)).sum();
-        return sumSq / values.size(); // population variance, matching the paper's VAR operator
+        return sumSq / values.size(); // population variance
     }
 
     // -----------------------------------------------------------------------
@@ -295,7 +288,8 @@ public class Query2_Main {
         private final double varFaThreshold;
         private final double varFfThreshold;
 
-        /** Re-initialised in {@link #open} — Pointer is not serialisable. */
+        private transient Pointer[] maintenanceZones;
+
         private transient error_handler_fn errorHandler;
 
         private static final DateTimeFormatter TIMESTAMP_FMT =
@@ -317,7 +311,17 @@ public class Query2_Main {
             errorHandler = new error_handler();
             functions.meos_initialize_timezone("UTC");
             functions.meos_initialize_error_handler(errorHandler);
-            log.info("MEOS initialized in BrakeMonitoringWindowFunction.open()");
+            // Parse the maintenance area polygons only once per worker.
+            // geog_in(wkt, -1) creates a geography type (SRID=4326 implicit), consistent
+            // with the tgeogpoint created by tgeogpoint_in below.
+            maintenanceZones = new Pointer[maintenanceAreasWkt.length];
+            for (int i = 0; i < maintenanceAreasWkt.length; i++) {
+                maintenanceZones[i] = functions.geog_in(maintenanceAreasWkt[i], -1);
+                if (maintenanceZones[i] == null) {
+                    log.error("geog_in returned null for maintenance area {}", i + 1);
+                }
+            }
+            log.info("MEOS initialized in BrakeMonitoringWindowFunction.open(), {} maintenance zones parsed", maintenanceZones.length);
         }
 
         /**
@@ -335,17 +339,6 @@ public class Query2_Main {
                 Iterable<AISData> elements,
                 Collector<String> out) {
 
-            // Parse the maintenance area polygons once per window invocation.
-            // geog_in(wkt, -1) creates a geography type (SRID=4326 implicit), consistent
-            // with the tgeogpoint created by tgeogpoint_in below.
-            Pointer[] maintenanceZones = new Pointer[maintenanceAreasWkt.length];
-            for (int i = 0; i < maintenanceAreasWkt.length; i++) {
-                maintenanceZones[i] = functions.geog_in(maintenanceAreasWkt[i], -1);
-                if (maintenanceZones[i] == null) {
-                    log.error("geog_in returned null for maintenance area {}", i + 1);
-                }
-            }
-
             String windowStart = millisToTimestamp(context.window().getStart());
             String windowEnd   = millisToTimestamp(context.window().getEnd());
 
@@ -357,7 +350,7 @@ public class Query2_Main {
 
                 String ts = millisToTimestamp(event.getTimestamp());
 
-                // Build a temporal geography point for this event — same approach as Query 1.
+                // Build a temporal geography point for this event: same approach as Query 1.
                 String tpointWkt = String.format(
                         "POINT(%f %f)@%s", event.getLon(), event.getLat(), ts);
 
@@ -385,15 +378,12 @@ public class Query2_Main {
 
                 // Paper Line 4: extract FA and FF proxy values from surviving events.
                 //
-                // FA proxy — automatic brake pipe pressure (bar):
+                // FA proxy: automatic brake pipe pressure (bar):
                 //   Derived from speed (knots), normalised to [0, MAX_SPEED_KNOTS] → [0, 7] bar.
-                //   Rapid speed changes produce high FA variance analogous to brake-pipe pressure
-                //   fluctuations on the SNCB dataset.
                 double fa = (event.getSpeed() / MAX_SPEED_KNOTS) * 7.0;
 
-                // FF proxy — fictitious brake cylinder pressure (bar):
+                // FF proxy: fictitious brake cylinder pressure (bar):
                 //   Derived from course (degrees [0, 360]), normalised to [0, 7] bar.
-                //   Course changes produce FF variance analogous to cylinder pressure changes.
                 double ff = (event.getCourse() / 360.0) * 7.0;
 
                 faValues.add(fa);
@@ -402,7 +392,7 @@ public class Query2_Main {
 
             if (faValues.isEmpty()) return; // no surviving events in this window
 
-            // Paper Line 4: variation(FA) and variation(FF) — statistical variance E[X²]-E[X]²
+            // Paper Line 4: variation(FA) and variation(FF): statistical variance
             double varFA = variance(faValues);
             double varFF = variance(ffValues);
 

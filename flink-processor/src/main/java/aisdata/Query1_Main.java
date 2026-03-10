@@ -263,10 +263,6 @@ public class Query1_Main {
         private final String[] zoneWkt;
         private final double distanceMeters;
 
-        // Parse the INPolygons only once per worker.
-        // geog_in(wkt, -1) creates a geography type (SRID=4326), so
-        // edwithin_tgeo_geo computes distances geodetically in metres - consistent
-        // with the tgeogpoint created below via tgeogpoint_in.
         private transient Pointer[] hazardZones;
 
         private transient error_handler_fn errorHandler;
@@ -286,6 +282,10 @@ public class Query1_Main {
             errorHandler = new error_handler();
             functions.meos_initialize_timezone("UTC");
             functions.meos_initialize_error_handler(errorHandler);
+            // Parse the INPolygons only once per worker.
+            // geog_in(wkt, -1) creates a geography type (SRID=4326), so
+            // edwithin_tgeo_geo computes distances geodetically in metres - consistent
+            // with the tgeogpoint created below via tgeogpoint_in.
             this.hazardZones = new Pointer[zoneWkt.length];
             for (int i = 0; i < zoneWkt.length; i++) {
                 hazardZones[i] = functions.geog_in(zoneWkt[i], -1);
