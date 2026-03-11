@@ -12,6 +12,7 @@ import java.util.Properties;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.CoGroupFunction;
+import org.apache.flink.api.common.functions.RichCoGroupFunction;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
@@ -211,7 +212,7 @@ public class Query7_Main {
      * </ol>
      */
     public static class ClosestPairsCoGroupFunction
-            implements CoGroupFunction<AISData, AISData, String> {
+            extends RichCoGroupFunction<AISData, AISData, String> {
 
         private static final Logger log =
                 LoggerFactory.getLogger(ClosestPairsCoGroupFunction.class);
@@ -223,6 +224,16 @@ public class Query7_Main {
 
         public ClosestPairsCoGroupFunction(int topK) {
             this.topK = topK;
+        }
+
+        private transient error_handler errorHandler;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            super.open(parameters);
+            errorHandler = new error_handler();
+            functions.meos_initialize_timezone("UTC");
+            functions.meos_initialize_error_handler(errorHandler);
         }
 
         /**
@@ -237,9 +248,6 @@ public class Query7_Main {
                 Iterable<AISData> leftEvents,
                 Iterable<AISData> rightEvents,
                 Collector<String> out) throws Exception {
-
-            functions.meos_initialize_timezone("UTC");
-            functions.meos_initialize_error_handler(new error_handler());
 
             List<AISData> lefts  = new ArrayList<>();
             List<AISData> rights = new ArrayList<>();
