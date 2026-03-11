@@ -221,6 +221,25 @@ public class Query9_Main {
             for (AISData e : rightEvents) rights.add(e);
             if (lefts.isEmpty() || rights.isEmpty()) return;
 
+            // Same precalculation logic as in Query 7
+            List<Pointer> geoLefts  = new ArrayList<>(lefts.size());
+            for (AISData left : lefts) {
+                String ts = millisToTimestamp(left.getTimestamp());
+                Pointer tp  = functions.tgeogpoint_in(
+                        String.format("POINT(%f %f)@%s", left.getLon(), left.getLat(), ts));
+                Pointer geo = (tp != null) ? functions.temporal_end_value(tp) : null;
+                geoLefts.add(geo); // null if tgeogpoint_in or temporal_end_value failed
+            }
+
+            List<Pointer> geoRights = new ArrayList<>(rights.size());
+            for (AISData right : rights) {
+                String ts = millisToTimestamp(right.getTimestamp());
+                Pointer tp  = functions.tgeogpoint_in(
+                        String.format("POINT(%f %f)@%s", right.getLon(), right.getLat(), ts));
+                Pointer geo = (tp != null) ? functions.temporal_end_value(tp) : null;
+                geoRights.add(geo);
+            }
+
             // Step 1: cross-product with mmsi1 != mmsi2, keeping min dist per (mmsi1, mmsi2).
             //
             // Unlike Query 7 (mmsi1 < mmsi2), here we keep BOTH (A,B) and (B,A) because
@@ -230,26 +249,18 @@ public class Query9_Main {
             Map<String, double[]> minDistMap = new HashMap<>();
             // value: [mmsi1, mmsi2, dist, lon1, lat1, lon2, lat2]
 
-            for (AISData left : lefts) {
-                for (AISData right : rights) {
+            for (int i = 0; i < lefts.size(); i++) {
+                AISData left    = lefts.get(i);
+                Pointer geoLeft = geoLefts.get(i);
+                if (geoLeft == null) continue;
+
+                for (int j = 0; j < rights.size(); j++) {
+                    AISData right    = rights.get(j);
+                    Pointer geoRight = geoRights.get(j);
+                    if (geoRight == null) continue;
 
                     // Paper Line 2: device_id != device_id2
                     if (left.getMmsi() == right.getMmsi()) continue;
-
-                    String tsLeft  = millisToTimestamp(left.getTimestamp());
-                    String tsRight = millisToTimestamp(right.getTimestamp());
-
-                    Pointer tpLeft = functions.tgeogpoint_in(
-                            String.format("POINT(%f %f)@%s",
-                                    left.getLon(), left.getLat(), tsLeft));
-                    Pointer tpRight = functions.tgeogpoint_in(
-                            String.format("POINT(%f %f)@%s",
-                                    right.getLon(), right.getLat(), tsRight));
-                    if (tpLeft == null || tpRight == null) continue;
-
-                    Pointer geoLeft  = functions.temporal_end_value(tpLeft);
-                    Pointer geoRight = functions.temporal_end_value(tpRight);
-                    if (geoLeft == null || geoRight == null) continue;
 
                     double dist = functions.geog_distance(geoLeft, geoRight);
 
