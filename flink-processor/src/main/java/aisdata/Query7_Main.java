@@ -7,11 +7,12 @@ import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Properties;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
-import org.apache.flink.api.common.functions.CoGroupFunction;
 import org.apache.flink.api.common.functions.RichCoGroupFunction;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kafka.source.KafkaSource;
@@ -196,7 +197,7 @@ public class Query7_Main {
     // -----------------------------------------------------------------------
 
     /**
-     * Flink {@link CoGroupFunction} for one 10-second tumbling window.
+     * Flink {@link RichCoGroupFunction} for one 10-second tumbling window.
      *
      * <p>Receives two iterables: all GPS events (left) and all GPS2 events (right) in the
      * window and processes them in three steps:
@@ -256,78 +257,85 @@ public class Query7_Main {
 
             if (lefts.isEmpty() || rights.isEmpty()) return;
 
+            // Precalculate geo Pointers for every event in lefts and rights BEFORE the
+            // double loop. Without this, tgeogpoint_in + temporal_end_value would be called
+            // once per pair (i.e. lefts.size() × rights.size() times), meaning each event's
+            // pointer is recomputed N times instead of once.
+            //
+            // Example: 20 navires × 5 events each → 100 events per side.
+            // Without precalculation : 100 × 100 = 10 000 native calls.
+            // With precalculation    : 100 + 100  =    200 native calls.
+            List<Pointer> geoLefts  = new ArrayList<>(lefts.size());
+            for (AISData left : lefts) {
+                String ts = millisToTimestamp(left.getTimestamp());
+                Pointer tp  = functions.tgeogpoint_in(
+                        String.format("POINT(%f %f)@%s", left.getLon(), left.getLat(), ts));
+                Pointer geo = (tp != null) ? functions.temporal_end_value(tp) : null;
+                geoLefts.add(geo); // null if tgeogpoint_in or temporal_end_value failed
+            }
+
+            List<Pointer> geoRights = new ArrayList<>(rights.size());
+            for (AISData right : rights) {
+                String ts = millisToTimestamp(right.getTimestamp());
+                Pointer tp  = functions.tgeogpoint_in(
+                        String.format("POINT(%f %f)@%s", right.getLon(), right.getLat(), ts));
+                Pointer geo = (tp != null) ? functions.temporal_end_value(tp) : null;
+                geoRights.add(geo);
+            }
+
             // Step 1 & 2: cross-product with mmsi1 < mmsi2 filter + distance computation.
             // Map keyed by "mmsi1:mmsi2" to keep only the minimum distance per unique pair.
+            // value: [mmsi1, mmsi2, dist, lon1, lat1, lon2, lat2].
             // Without this deduplication, the cross-product would generate O(n^2) entries for
             // the same vessel pair (e.g. 10 events x 10 events = 100 combinations), and the
             // top-K would select 10 instances of the same pair rather than 10 distinct pairs.
-            java.util.Map<String, long[]>   pairMmsiMap     = new java.util.LinkedHashMap<>();
-            java.util.Map<String, double[]> pairPositionMap = new java.util.LinkedHashMap<>();
-            java.util.Map<String, Double>   distanceMap     = new java.util.LinkedHashMap<>();
+            Map<String, double[]> pairMap = new HashMap<>();
 
-            for (AISData left : lefts) {
-                for (AISData right : rights) {
+            for (int i = 0; i < lefts.size(); i++) {
+                AISData left    = lefts.get(i);
+                Pointer geoLeft = geoLefts.get(i);
+                if (geoLeft == null) continue;
+
+                for (int j = 0; j < rights.size(); j++) {
+                    AISData right    = rights.get(j);
+                    Pointer geoRight = geoRights.get(j);
+                    if (geoRight == null) continue;
 
                     // Paper Line 2: device_id < device_id2
                     if (left.getMmsi() >= right.getMmsi()) continue;
-
-                    String tsLeft  = millisToTimestamp(left.getTimestamp());
-                    String tsRight = millisToTimestamp(right.getTimestamp());
-
-                    Pointer tpLeft = functions.tgeogpoint_in(
-                            String.format("POINT(%f %f)@%s",
-                                    left.getLon(), left.getLat(), tsLeft));
-                    Pointer tpRight = functions.tgeogpoint_in(
-                            String.format("POINT(%f %f)@%s",
-                                    right.getLon(), right.getLat(), tsRight));
-
-                    if (tpLeft == null || tpRight == null) continue;
-
-                    Pointer geoLeft  = functions.temporal_end_value(tpLeft);
-                    Pointer geoRight = functions.temporal_end_value(tpRight);
-                    if (geoLeft == null || geoRight == null) continue;
 
                     double dist = functions.geog_distance(geoLeft, geoRight);
 
                     // Keep only the minimum distance per unique (mmsi1, mmsi2) pair.
                     String key = left.getMmsi() + ":" + right.getMmsi();
-                    if (!distanceMap.containsKey(key) || dist < distanceMap.get(key)) {
-                        pairMmsiMap.put(key, new long[]{left.getMmsi(), right.getMmsi()});
-                        pairPositionMap.put(key, new double[]{
+                    if (!pairMap.containsKey(key) || dist < pairMap.get(key)[2]) {
+                        pairMap.put(key, new double[]{
+                                left.getMmsi(), right.getMmsi(), dist,
                                 left.getLon(), left.getLat(),
                                 right.getLon(), right.getLat()});
-                        distanceMap.put(key, dist);
                     }
                 }
             }
 
-            List<long[]>    pairMmsis     = new ArrayList<>(pairMmsiMap.values());
-            List<double[]>  pairPositions = new ArrayList<>(pairPositionMap.values());
-            List<Double>    distances     = new ArrayList<>(distanceMap.values());
+            if (pairMap.isEmpty()) return;
 
-            if (distances.isEmpty()) return;
+            // Step 3: top-K selection (paper Line 5): sort all pairs by mindist ascending,
+            // keep only the topK smallest.
+            List<double[]> pairs = new ArrayList<>(pairMap.values());
+            pairs.sort(Comparator.comparingDouble(e -> e[2]));
 
-            // Step 3: top-K selection (paper Line 5): sort by mindist ascending, keep top-K.
-            // Build an index list sorted by distance, then take the first topK entries.
-            List<Integer> indices = new ArrayList<>();
-            for (int i = 0; i < distances.size(); i++) indices.add(i);
-            indices.sort(Comparator.comparingDouble(distances::get));
-
-            int emitCount = Math.min(topK, indices.size());
+            int emitCount = Math.min(topK, pairs.size());
             for (int rank = 0; rank < emitCount; rank++) {
-                int    idx  = indices.get(rank);
-                long[] mmsi = pairMmsis.get(idx);
-                double[] pos = pairPositions.get(idx);
-                double dist  = distances.get(idx);
+                double[] p = pairs.get(rank);
 
                 String result = String.format(
                         "[TOPK][Q7] rank=%2d/%d | MMSI1=%-12d (lon=%9.5f lat=%8.5f)"
                                 + " | MMSI2=%-12d (lon=%9.5f lat=%8.5f)"
                                 + " | mindist=%10.3f m",
                         rank + 1, emitCount,
-                        mmsi[0], pos[0], pos[1],
-                        mmsi[1], pos[2], pos[3],
-                        dist);
+                        (long) p[0], p[3], p[4],
+                        (long) p[1], p[5], p[6],
+                        p[2]);
 
                 log.info(result);
                 out.collect(result);
