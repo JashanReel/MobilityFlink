@@ -9,6 +9,7 @@ import java.util.Properties;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.JoinFunction;
+import org.apache.flink.api.common.functions.RichJoinFunction;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
@@ -56,7 +57,7 @@ import functions.error_handler;
  *       Kafka topic, consumed by a separate {@link KafkaSource} with a different consumer
  *       group ID ({@code flink_consumer_q6_left} vs {@code flink_consumer_q6_right}).
  *       Flink's windowed {@code join().where(mmsi).equalTo(mmsi)} groups pairs of events
- *       from the two views by MMSI within each window — equivalent to the
+ *       from the two views by MMSI within each window, equivalent to the
  *       {@code device_id == device_id2} join predicate.</li>
  *   <li><b>Line 3 (10-second tumbling window)</b>: {@code TumblingEventTimeWindows.of(Time.seconds(10))},
  *       same as Query 1.</li>
@@ -67,7 +68,7 @@ import functions.error_handler;
  *       trajectories at any shared instant.</li>
  *   <li><b>Line 5 (lat > 0.0)</b>: Only pairs where the left-side latitude is strictly
  *       positive are emitted. All AIS data in this dataset (Danish waters) has positive
- *       latitudes (~55–58°N), so all pairs will pass — demonstrating the filter mechanism.</li>
+ *       latitudes (~55–58°N), so all pairs will pass</li>
  * </ul>
  *
  * <p><b>Self-join semantics:</b>
@@ -102,10 +103,6 @@ public class Query6_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query6_Main.class);
 
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
-
     public static void main(String[] args) throws Exception {
 
         logger.info("Java library path: {}", System.getProperty("java.library.path"));
@@ -126,7 +123,7 @@ public class Query6_Main {
                     StringDeserializer.class.getName());
             properties.setProperty("auto.offset.reset", "earliest");
 
-            // GPS — left side of the join (paper: Query::from(GPS))
+            // GPS: left side of the join (paper: Query::from(GPS))
             KafkaSource<AISData> kafkaSourceLeft = KafkaSource.<AISData>builder()
                     .setBootstrapServers("kafka:29092")
                     .setGroupId("flink_consumer_q6_left")
@@ -135,7 +132,7 @@ public class Query6_Main {
                     .setValueOnlyDeserializer(new AISDataDeserializationSchema())
                     .build();
 
-            // GPS2 — right side of the join (paper: "a second logical view of the GPS stream")
+            // GPS2: right side of the join (paper: "a second logical view of the GPS stream")
             // Separate consumer group so both sources read all messages independently.
             KafkaSource<AISData> kafkaSourceRight = KafkaSource.<AISData>builder()
                     .setBootstrapServers("kafka:29092")
@@ -145,7 +142,7 @@ public class Query6_Main {
                     .setValueOnlyDeserializer(new AISDataDeserializationSchema())
                     .build();
 
-            // Both streams use the same watermark strategy — event-time with 10s tolerance.
+            // Both streams use the same watermark strategy: event-time with 10s tolerance.
             WatermarkStrategy<AISData> watermarkStrategy =
                     WatermarkStrategy.<AISData>forBoundedOutOfOrderness(Duration.ofSeconds(10))
                             .withTimestampAssigner((event, recordTs) -> event.getTimestamp())
@@ -199,11 +196,9 @@ public class Query6_Main {
      * {@code left} and {@code right} have the same MMSI (enforced by the join predicate).
      *
      * <p>MEOS is initialised inline for each call because {@link JoinFunction} does not
-     * expose a Flink {@code open()} lifecycle method. This is safe because
-     * {@code meos_initialize_timezone} is idempotent.
+     * expose a Flink {@code open()} lifecycle method.
      */
-    public static class NearestApproachJoinFunction
-            implements JoinFunction<AISData, AISData, String> {
+    public static class NearestApproachJoinFunction extends RichJoinFunction<AISData, AISData, String> {
 
         private static final Logger log =
                 LoggerFactory.getLogger(NearestApproachJoinFunction.class);
@@ -211,11 +206,18 @@ public class Query6_Main {
         private static final DateTimeFormatter TIMESTAMP_FMT =
                 DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ssxxx");
 
+        private transient error_handler errorHandler;
+
+        @Override
+        public void open(Configuration parameters) throws Exception {
+            super.open(parameters);
+            errorHandler = new error_handler();
+            functions.meos_initialize_timezone("UTC");
+            functions.meos_initialize_error_handler(errorHandler);
+        }
+
         @Override
         public String join(AISData left, AISData right) throws Exception {
-
-            functions.meos_initialize_timezone("UTC");
-            functions.meos_initialize_error_handler(new error_handler());
 
             String tsLeft  = millisToTimestamp(left.getTimestamp());
             String tsRight = millisToTimestamp(right.getTimestamp());
@@ -241,19 +243,16 @@ public class Query6_Main {
             //
             // However, nad_tgeo_tgeo requires temporal overlap between the two inputs.
             // For two TInstants at DIFFERENT timestamps there is no overlap, so MEOS
-            // returns Double.MAX_VALUE (+infinity) — unusable for divergence measurement.
+            // returns Double.MAX_VALUE (+infinity) which is unusable for divergence measurement.
             // For two TInstants at the SAME timestamp it returns the correct distance,
             // but in our self-join most pairs have different timestamps.
             //
-            // APPROXIMATION USED HERE:
+            // Alternative used here:
             // We use geog_distance on the raw geography points extracted via
             // temporal_end_value(), which gives the direct geodetic distance (metres on
             // WGS-84) between the two positions regardless of their timestamps. This is
             // equivalent to nad_tgeo_tgeo only when ts_left == ts_right. For ts_left !=
-            // ts_right it is a spatial-only distance, not a true nearest-approach distance.
-            // For a rigorous implementation, one would build TSequences from the window
-            // events and call nad_tgeo_tgeo on those sequences to obtain a proper temporal
-            // nearest-approach distance with interpolation.
+            // ts_right it is a spatial-only distance.
             Pointer geoLeft  = functions.temporal_end_value(tpointLeft);
             Pointer geoRight = functions.temporal_end_value(tpointRight);
 
@@ -264,10 +263,9 @@ public class Query6_Main {
 
             double mindist = functions.geog_distance(geoLeft, geoRight);
 
-            // Paper Line 5: filter(lat > 0.0) — keep only pairs where left-side lat is positive.
+            // Paper Line 5: filter(lat > 0.0): keep only pairs where left-side lat is positive.
             // All AIS positions in this dataset are in the Northern Hemisphere (~55–58°N),
-            // so all pairs pass this filter. The check is preserved to faithfully reproduce
-            // the paper's query semantics.
+            // so all pairs pass this filter.
             if (left.getLat() <= 0.0) return null;
 
             String result = String.format(
