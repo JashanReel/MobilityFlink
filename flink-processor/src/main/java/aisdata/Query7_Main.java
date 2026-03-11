@@ -58,10 +58,9 @@ import functions.error_handler;
  * <p><b>Mapping to this implementation:</b>
  * <ul>
  *   <li><b>Line 2 (joinWith GPS2, device_id &lt; device_id2)</b>: Unlike Query 6 which
- *       self-joins on equality ({@code device_id == device_id2}), here the condition is a
- *       strict inequality — only pairs of <em>different</em> vessels where the left MMSI is
- *       numerically smaller than the right. This ensures each unordered pair is produced
- *       exactly once (e.g. {A,B} but not {B,A}).
+ *       self-joins on equality ({@code device_id == device_id2}), here the condition only pairs <em>different</em>
+ *       vessels where the left MMSI is numerically smaller than the right.
+ *       This ensures each unordered pair is produced exactly once (e.g. {A,B} but not {B,A}).
  *       <br><br>
  *       Flink's {@code join().where().equalTo()} API requires key equality and cannot
  *       express inequality predicates. We therefore use {@code coGroup} with a constant key
@@ -70,7 +69,7 @@ import functions.error_handler;
  *       applied manually inside {@link ClosestPairsCoGroupFunction}.</li>
  *   <li><b>Line 3 (10-second tumbling window)</b>: {@code TumblingEventTimeWindows.of(Time.seconds(10))},
  *       same as Queries 1 and 6.</li>
- *   <li><b>Line 4 (nearest_approach_distance)</b>: Same approximation as Query 6 —
+ *   <li><b>Line 4 (nearest_approach_distance)</b>: Same as Query 6:
  *       {@code geog_distance(temporal_end_value(p1), temporal_end_value(p2))} gives the
  *       geodetic distance between two positions. See Query 6 Javadoc for the discussion on
  *       why {@code nad_tgeo_tgeo} cannot be used directly on TInstants.</li>
@@ -82,13 +81,10 @@ import functions.error_handler;
  *
  * <p><b>Why coGroup instead of join?</b>
  * <br>Flink's windowed join API ({@code stream.join(other).where(k1).equalTo(k2)}) requires
- * a key equality predicate, which maps to {@code device_id == device_id2}. It cannot express
- * {@code device_id &lt; device_id2} directly. {@code coGroup} sidesteps this by routing all
+ * a key equality predicate, which maps to {@code device_id == device_id2}. {@code coGroup} sidesteps this by routing all
  * events from both streams in the window to a single function that receives two iterables
  * (left events, right events). We then compute the full cross-product manually and apply the
- * inequality filter, enabling us to implement the paper's join condition faithfully.
- * The top-K ranking is a natural fit inside the same CoGroup function since all pairs for
- * the window are available simultaneously.
+ * inequality filter.
  *
  * <p><b>HOW TO RUN</b>
  * <br>In the Dockerfile, change the entrypoint from {@code aisdata.Main} to
@@ -109,19 +105,11 @@ public class Query7_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query7_Main.class);
 
-    // -----------------------------------------------------------------------
-    // Configuration
-    // -----------------------------------------------------------------------
-
     /**
-     * Number of closest pairs to retain per window — the {@code k} in {@code topK(mindist, 10)}.
+     * Number of closest pairs to retain per window: the {@code k} in {@code topK(mindist, 10)}.
      * The paper uses k=10.
      */
     private static final int TOP_K = 10;
-
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
 
@@ -143,7 +131,7 @@ public class Query7_Main {
                     StringDeserializer.class.getName());
             properties.setProperty("auto.offset.reset", "earliest");
 
-            // GPS — left stream
+            // GPS: left stream
             KafkaSource<AISData> kafkaSourceLeft = KafkaSource.<AISData>builder()
                     .setBootstrapServers("kafka:29092")
                     .setGroupId("flink_consumer_q7_left")
@@ -152,7 +140,7 @@ public class Query7_Main {
                     .setValueOnlyDeserializer(new AISDataDeserializationSchema())
                     .build();
 
-            // GPS2 — right stream (second logical view, separate consumer group)
+            // GPS2: right stream (second logical view, separate consumer group)
             KafkaSource<AISData> kafkaSourceRight = KafkaSource.<AISData>builder()
                     .setBootstrapServers("kafka:29092")
                     .setGroupId("flink_consumer_q7_right")
@@ -171,13 +159,12 @@ public class Query7_Main {
 
             // Pipeline implementing the MobilityNebula Query 7 pseudocode (paper Section 4.1):
             //
-            //   coGroup with constant key   → routes ALL events from both streams into the
-            //                                 same window partition, enabling cross-vessel
-            //                                 pair computation (paper Lines 2–4).
+            //   coGroup with constant key   → routes all events from both streams into the
+            //                                 same window partition.
             //   window(Tumbling 10s)         → paper Line 3.
             //   apply(CoGroupFunction)       → paper Lines 2, 4, 5:
             //                                    - Line 2: mmsi1 < mmsi2 filter
-            //                                    - Line 4: geog_distance (NAD approximation)
+            //                                    - Line 4: geog_distance
             //                                    - Line 5: sort by mindist, emit top-K
             //   print()                      → paper Line 6: sink.
             gps.coGroup(gps2)
@@ -208,11 +195,10 @@ public class Query7_Main {
     // -----------------------------------------------------------------------
 
     /**
-     * Flink {@link CoGroupFunction} implementing paper Lines 2, 4, and 5 for one
-     * 10-second tumbling window.
+     * Flink {@link CoGroupFunction} for one 10-second tumbling window.
      *
-     * <p>Receives two iterables — all GPS events (left) and all GPS2 events (right) in the
-     * window — and processes them in three steps:
+     * <p>Receives two iterables: all GPS events (left) and all GPS2 events (right) in the
+     * window and processes them in three steps:
      * <ol>
      *   <li><b>Cross-product with filter (Line 2)</b>: builds all pairs
      *       {@code (left_i, right_j)} where {@code left_i.mmsi &lt; right_j.mmsi}, ensuring
@@ -255,7 +241,6 @@ public class Query7_Main {
             functions.meos_initialize_timezone("UTC");
             functions.meos_initialize_error_handler(new error_handler());
 
-            // Materialise both iterables — needed for the nested cross-product loop.
             List<AISData> lefts  = new ArrayList<>();
             List<AISData> rights = new ArrayList<>();
             for (AISData e : leftEvents)  lefts.add(e);
@@ -263,10 +248,7 @@ public class Query7_Main {
 
             if (lefts.isEmpty() || rights.isEmpty()) return;
 
-            // Step 1 & 2 — cross-product with mmsi1 < mmsi2 filter + distance computation.
-            // Using one representative event per MMSI (the first seen in the window) to
-            // avoid computing O(n²) pairs for the same vessel: we want inter-vessel distances,
-            // not intra-vessel ones.
+            // Step 1 & 2: cross-product with mmsi1 < mmsi2 filter + distance computation.
             // Map keyed by "mmsi1:mmsi2" to keep only the minimum distance per unique pair.
             // Without this deduplication, the cross-product would generate O(n^2) entries for
             // the same vessel pair (e.g. 10 events x 10 events = 100 combinations), and the
@@ -317,7 +299,7 @@ public class Query7_Main {
 
             if (distances.isEmpty()) return;
 
-            // Step 3 — top-K selection (paper Line 5): sort by mindist ascending, keep top-K.
+            // Step 3: top-K selection (paper Line 5): sort by mindist ascending, keep top-K.
             // Build an index list sorted by distance, then take the first topK entries.
             List<Integer> indices = new ArrayList<>();
             for (int i = 0; i < distances.size(); i++) indices.add(i);

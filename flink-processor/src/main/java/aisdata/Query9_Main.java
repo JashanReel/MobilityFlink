@@ -61,14 +61,13 @@ import functions.error_handler;
  * <br>Query 7 uses {@code device_id &lt; device_id2} and computes a <em>global</em> top-K
  * across all vessel pairs. Query 9 uses {@code device_id != device_id2} and computes a
  * <em>per-device</em> top-K: each vessel independently finds its k nearest neighbours.
- * This means each pair {A,B} appears twice — once in A's neighbour list and once in B's —
+ * This means each pair {A,B} appears twice: once in A's neighbour list and once in B's
  * whereas in Query 7 each pair appears exactly once.
  *
  * <p><b>Mapping to this implementation:</b>
  * <ul>
  *   <li><b>Lines 2–4</b>: same {@code coGroup} approach as Query 7 (see {@link Query7_Main}),
  *       with the filter changed from {@code mmsi1 &lt; mmsi2} to {@code mmsi1 != mmsi2}.
- *       The minimum distance per (mmsi1, mmsi2) pair is retained as in Query 7.</li>
  *   <li><b>Line 5 (groupBy device_id)</b>: after computing all pairwise distances, results
  *       are grouped by the left-side MMSI. Each vessel has its own list of (neighbour, dist)
  *       entries.</li>
@@ -87,12 +86,8 @@ public class Query9_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query9_Main.class);
 
-    /** Number of nearest neighbours to retain per device — the {@code k} in knn_agg. */
+    /** Number of nearest neighbours to retain per device: the {@code k} in knn_agg. */
     private static final int K = 3;
-
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
 
@@ -139,7 +134,7 @@ public class Query9_Main {
 
             // Pipeline implementing the MobilityNebula Query 9 pseudocode:
             //
-            //   coGroup (constant key) → delivers ALL events from both streams to one function.
+            //   coGroup (constant key) → delivers all events from both streams to one function.
             //   window(Tumbling 10s)   → paper Line 3.
             //   apply(KnnCoGroupFn)    → paper Lines 2, 4, 5, 6:
             //                             - mmsi1 != mmsi2 filter (Line 2)
@@ -179,7 +174,7 @@ public class Query9_Main {
      *
      * <p>Difference from {@link Query7_Main.ClosestPairsCoGroupFunction}:
      * <ul>
-     *   <li>Filter: {@code mmsi1 != mmsi2} instead of {@code mmsi1 &lt; mmsi2} — each
+     *   <li>Filter: {@code mmsi1 != mmsi2} instead of {@code mmsi1 &lt; mmsi2}: each
      *       ordered pair (A→B) and (B→A) is kept separately, because A's kNN list and
      *       B's kNN list are independent.</li>
      *   <li>Aggregation: after computing the minimum distance per (mmsi1, mmsi2) pair,
@@ -217,12 +212,12 @@ public class Query9_Main {
             for (AISData e : rightEvents) rights.add(e);
             if (lefts.isEmpty() || rights.isEmpty()) return;
 
-            // Step 1 — cross-product with mmsi1 != mmsi2, keeping min dist per (mmsi1, mmsi2).
+            // Step 1: cross-product with mmsi1 != mmsi2, keeping min dist per (mmsi1, mmsi2).
             //
             // Unlike Query 7 (mmsi1 < mmsi2), here we keep BOTH (A,B) and (B,A) because
             // A's kNN list and B's kNN list are computed independently.
             // The deduplication map ensures we keep the minimum distance over all timestamp
-            // combinations for each directed pair — same rationale as in Query 7.
+            // combinations for each directed pair.
             Map<String, double[]> minDistMap = new HashMap<>();
             // value: [mmsi1, mmsi2, dist, lon1, lat1, lon2, lat2]
 
@@ -262,7 +257,7 @@ public class Query9_Main {
 
             if (minDistMap.isEmpty()) return;
 
-            // Step 2 — groupBy device_id (paper Line 5):
+            // Step 2: groupBy device_id (paper Line 5):
             // Build a per-mmsi1 list of (mmsi2, dist) entries.
             Map<Integer, List<double[]>> byDevice = new HashMap<>();
             for (double[] entry : minDistMap.values()) {
@@ -270,7 +265,7 @@ public class Query9_Main {
                 byDevice.computeIfAbsent(mmsi1, x -> new ArrayList<>()).add(entry);
             }
 
-            // Step 3 — knn_agg(mindist, device_id2, k) (paper Line 6):
+            // Step 3: knn_agg(mindist, device_id2, k) (paper Line 6):
             // For each device, sort by dist ascending and keep the k nearest neighbours.
             for (Map.Entry<Integer, List<double[]>> deviceEntry : byDevice.entrySet()) {
                 int          mmsi1     = deviceEntry.getKey();
