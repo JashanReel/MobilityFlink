@@ -109,10 +109,6 @@ public class Query1_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query1_Main.class);
 
-    // -----------------------------------------------------------------------
-    // Configuration
-    // -----------------------------------------------------------------------
-
     /**
      * Distance threshold in metres used in the {@code edwithin_tgeo_geo} call (paper Line 2).
      *

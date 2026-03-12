@@ -66,17 +66,15 @@ import functions.error_handler_fn;
  *       is the same geography type ({@code geog_in}) as in Query 1. Distance = 1 metre,
  *       which is effectively an intersection test: only points inside or on the boundary
  *       of the polygon pass the filter.</li>
- *   <li><b>Line 3 (groupBy device_id)</b>: Implemented with {@code keyBy(getMmsi)}.
- *       In the SNCB dataset, {@code device_id} is the train identifier; here MMSI plays
- *       the equivalent role.</li>
+ *   <li><b>Line 3 (groupBy device_id)</b>: Implemented with {@code keyBy(getMmsi)}.</li>
  *   <li><b>Line 4 (sliding window 45s / 5s)</b>: Implemented with
  *       {@code SlidingEventTimeWindows.of(Time.seconds(45), Time.seconds(5))}. This is
- *       coarser than Queries 3–4 (10s/10ms): a new window opens every 5 seconds, producing
+ *       larger than Queries 3–4 (10s/10ms): a new window opens every 5 seconds, producing
  *       9 overlapping windows simultaneously (45s / 5s = 9).</li>
  *   <li><b>Line 5 (temporal_sequence + avg + min)</b>: All three aggregations are computed
  *       in a single {@link ProcessWindowFunction} pass over the window events:
  *       <ul>
- *         <li>{@code temporal_sequence}: same as Queries 3–4 — builds a {@code tgeogpoint}
+ *         <li>{@code temporal_sequence}: builds a {@code tgeogpoint}
  *             sequence from (lon, lat, ts) triplets.</li>
  *         <li>{@code avg(gps_speed)}: arithmetic mean of the speed values in the window.</li>
  *         <li>{@code min(gps_speed)}: minimum speed value in the window.</li>
@@ -92,8 +90,7 @@ import functions.error_handler_fn;
  * <p><b>Speed unit conversion (knots → m/s):</b>
  * <br>The paper uses m/s thresholds (50 m/s avg, 20 m/s min) for SNCB trains. AIS speed
  * is reported in knots (1 kn = 0.5144 m/s). The AIS {@code speed} field is converted to
- * m/s before computing avg and min — see {@link #KNOTS_TO_MS}. The alert thresholds are
- * adapted to realistic vessel speeds:
+ * m/s before computing avg and min: see {@link #KNOTS_TO_MS}.
  * <ul>
  *   <li>{@link #AVG_SPEED_THRESHOLD_MS}: 7.5 m/s ≈ 14.6 kn - fast cruise speed in AIS</li>
  *   <li>{@link #MIN_SPEED_THRESHOLD_MS}: 5.0 m/s ≈ 9.7 kn - slow speed</li>
@@ -118,10 +115,6 @@ public class Query5_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query5_Main.class);
 
-    // -----------------------------------------------------------------------
-    // Configuration
-    // -----------------------------------------------------------------------
-
     /**
      * Conversion factor from knots (AIS speed unit) to metres per second.
      * 1 knot = 1 nautical mile/hour = 1852 m / 3600 s ≈ 0.5144 m/s.
@@ -131,53 +124,44 @@ public class Query5_Main {
     private static final double KNOTS_TO_MS = 0.5144;
 
     /**
-     * Average speed alert threshold in m/s — paper Line 6: {@code avg_speed > 50}.
+     * Average speed alert threshold in m/s from paper Line 6: {@code avg_speed > 50}.
      *
-     * <p>The paper uses 50 m/s for SNCB trains. Adapted here to 7.5 m/s (~14.6 kn),
-     * a typical AIS vessel cruise speed, so that alerts fire on real data.
-     * Change to 50.0 for the real SNCB deployment.
+     * <p>The paper uses 50 m/s for SNCB trains. Adapted here to 7.5 m/s (~14.6 kn).
      */
     private static final double AVG_SPEED_THRESHOLD_MS = 7.5;
 
     /**
-     * Minimum speed alert threshold in m/s — paper Line 6: {@code min_speed > 20}.
+     * Minimum speed alert threshold in m/s from paper Line 6: {@code min_speed > 20}.
      *
      * <p>The paper uses 20 m/s for SNCB trains. Adapted here to 5.0 m/s (~9.7 kn).
-     * Change to 20.0 for the real SNCB deployment.
      */
     private static final double MIN_SPEED_THRESHOLD_MS = 5.0;
 
     /**
-     * Geofence polygon — the {@code POLYGON} argument in paper Line 2.
+     * Geofence polygon: the {@code POLYGON} argument in paper Line 2.
      *
      * <p>The paper uses a polygon covering the Brussels area (SNCB dataset):
      * <pre>
      *   POLYGON((4.32 50.60, 4.32 50.72, 4.48 50.72, 4.48 50.60, 4.32 50.60))
      * </pre>
      *
-     * <p>Adapted here to cover the Great Belt (Store Baelt) area where MMSI 219027804
-     * operates in the AIS dataset (lon 11.76–12.07, lat 55.82–55.95). This vessel reaches
-     * speeds up to 31.8 kn (≈ 16.4 m/s), well above both average and minimum speed thresholds, ensuring
-     * alerts fire on the real AIS data.
+     * <p>Adapted here to cover area where MMSI 219027804 operates in the AIS dataset (lon 11.76–12.07, lat 55.82–55.95).
+     * This vessel reaches speeds up to 31.8 kn (≈ 16.4 m/s), well above both average and minimum speed thresholds, ensuring
+     * alerts fire on the AIS data.
      *
-     * <p>Parsed with {@code geog_in(wkt, -1)} — SRID=4326 geography, consistent with
+     * <p>Parsed with {@code geog_in(wkt, -1)}: SRID=4326 geography, consistent with
      * {@code tgeogpoint_in}. Distance = {@link #GEOFENCE_DISTANCE_METERS}.
      */
     private static final String GEOFENCE_WKT =
             "POLYGON((11.76 55.82, 11.76 55.95, 12.07 55.95, 12.07 55.82, 11.76 55.82))";
 
     /**
-     * Distance parameter for {@code edwithin_tgeo_geo} in metres — paper Line 2 uses 1 m.
+     * Distance parameter for {@code edwithin_tgeo_geo} in metres: paper Line 2 uses 1 m.
      *
      * <p>A distance of 1 m is effectively an intersection test: the point must be inside
      * or within 1 m of the polygon boundary. Kept at 1 m here to match the paper semantics.
-     * Increase to widen the geofence margin if needed.
      */
     private static final double GEOFENCE_DISTANCE_METERS = 1.0;
-
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
 
@@ -285,7 +269,7 @@ public class Query5_Main {
         private final double avgSpeedThresholdMs;
         private final double minSpeedThresholdMs;
 
-        /** Re-initialised in {@link #open} — Pointer is not serialisable. */
+        /** Initialised in {@link #open} since Pointer is not serialisable. */
         private transient error_handler_fn errorHandler;
 
         /**
@@ -346,14 +330,12 @@ public class Query5_Main {
          * aggregation to match the paper's m/s thresholds.
          *
          * <p><b>Paper Line 6</b>: the OR condition {@code (avg_speed > 50) || (min_speed > 20)}
-         * fires if either the average or the minimum speed crosses its threshold. Using OR
-         * (not AND) means an alert fires even if only one condition is met — catching both
-         * sustained high speed (high avg) and constant high speed (high min).
+         * fires if either the average or the minimum speed crosses its threshold.
          *
-         * @param mmsi     vessel identifier (the key used by keyBy, maps to device_id in paper)
-         * @param context  window metadata (start/end timestamps)
-         * @param elements all AISData events in this (MMSI, window) pair
-         * @param out      collector for the high-speed alert string
+         * @param mmsi      vessel identifier (the key used by keyBy, maps to device_id in paper)
+         * @param context   window metadata (start/end timestamps)
+         * @param elements  all AISData events in this (MMSI, window) pair
+         * @param out       collector for the high-speed alert string
          */
         @Override
         public void process(
@@ -395,9 +377,9 @@ public class Query5_Main {
 
             surviving.sort((a, b) -> Long.compare(a.getTimestamp(), b.getTimestamp()));
 
-            // Paper Line 5 — three aggregations computed in a single pass:
+            // Paper Line 5: three aggregations computation
 
-            // (a) temporal_sequence(lon, lat, ts) — identical to Queries 3–4.
+            // (a) temporal_sequence(lon, lat, ts).
             StringBuilder seq = new StringBuilder("{");
             double speedSumMs = 0.0;
             double minSpeedMs = Double.MAX_VALUE;

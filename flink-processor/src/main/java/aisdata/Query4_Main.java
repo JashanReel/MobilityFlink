@@ -65,11 +65,11 @@ import functions.error_handler_fn;
  *       returning {@code null} are skipped.
  *       <br><br>
  *       This differs from Queries 1 and 2 where the filter returned an {@code int} (0 or 1).
- *       {@code tgeo_at_stbox} returns the restricted temporal object itself — a null-check
+ *       {@code tgeo_at_stbox} returns the restricted temporal object itself & a null-check
  *       replaces the {@code == 1} comparison.</li>
- *   <li><b>Line 3 (sliding window 10s / 10ms)</b>: Identical to Query 3 —
+ *   <li><b>Line 3 (sliding window 10s / 10ms)</b>:
  *       {@code SlidingEventTimeWindows.of(Time.seconds(10), Time.milliseconds(10))}.</li>
- *   <li><b>Line 4 (temporal_sequence)</b>: Identical to Query 3 — surviving events are
+ *   <li><b>Line 4 (temporal_sequence)</b>: surviving events are
  *       assembled into a {@code tgeogpoint} sequence via {@code tgeogpoint_in} and serialised
  *       to EWKT via {@code tspatial_as_ewkt}.</li>
  * </ul>
@@ -84,11 +84,6 @@ import functions.error_handler_fn;
  * </ul>
  * The paper uses {@code stbox xt(((4.3,50),(4.5,50.6)),[2024-10-24,2024-11-26])} which covers
  * the Brussels region. Here the box is adapted to the AIS dataset (Danish waters, January 2021)
- *
- * <p><b>STBox construction:</b> the box is built via {@code stbox_make(geodetic=true)}
- * rather than {@code stbox_in()} — see the {@code open()} method Javadoc for the reason.
- * {@code XT} denotes a box with both spatial (X) and temporal (T) dimensions. Other variants
- * exist: {@code X} (spatial only), {@code T} (temporal only), {@code Z} (3D spatial + time).
  *
  * <p><b>HOW TO RUN</b>
  * <br>In the Dockerfile, change the entrypoint from {@code aisdata.Main} to
@@ -109,15 +104,11 @@ public class Query4_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query4_Main.class);
 
-    // -----------------------------------------------------------------------
-    // Configuration
-    // -----------------------------------------------------------------------
-
     /**
      * Spatiotemporal box used to restrict the stream — the {@code stbox xt} argument in
      * paper Line 2.
      *
-     * <p>The paper uses the Brussels region with a 2024 timestamp range (SNCB dataset):
+     * <p>The paper uses the Brussels region with a 2024 timestamp range :
      * <pre>
      *   stbox xt(((4.3,50),(4.5,50.6)),[2024-10-24,2024-11-26])
      * </pre>
@@ -152,9 +143,6 @@ public class Query4_Main {
      */
     private static final String STBOX_TSPAN = "[2021-01-08 00:00:00+00, 2021-01-09 00:00:00+00]";
 
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
 
@@ -250,18 +238,12 @@ public class Query4_Main {
 
         /**
          * Parsed STBox pointer. Initialised once in {@link #open} via {@code stbox_make()}
-         * and reused across all window invocations — construction is expensive and the box
+         * and reused across all window invocations since construction is expensive and the box
          * never changes. Declared transient because JNR-FFI Pointer objects are not serialisable.
-         *
-         * <p>We use {@code stbox_make()} instead of {@code stbox_in()} to avoid a MEOS crash:
-         * {@code stbox_in("SRID=4326;STBOX XT(...)")} creates a geodetic STBox but the
-         * internal representation does not match the tgeogpoint created by {@code tgeogpoint_in},
-         * causing a SIGSEGV in JNR-FFI. {@code stbox_make(geodetic=true)} constructs the box
-         * with the correct internal flags for geography types.
          */
         private transient Pointer stbox;
 
-        /** Re-initialised in {@link #open} — Pointer is not serialisable. */
+        /** Initialised in {@link #open}: Pointer is not serialisable. */
         private transient error_handler_fn errorHandler;
 
         private static final DateTimeFormatter TIMESTAMP_FMT =
@@ -290,11 +272,7 @@ public class Query4_Main {
             functions.meos_initialize_timezone("UTC");
             functions.meos_initialize_error_handler(errorHandler);
 
-            // Build the STBox programmatically via stbox_make() to avoid the SIGSEGV
-            // that occurs when stbox_in() parses "SRID=4326;STBOX XT(...)" and produces
-            // a geodetic box with a mismatched internal representation for tgeogpoint.
-            //
-            // stbox_make parameters:
+           // stbox_make parameters:
             //   hasx=true   → include spatial (XY) dimensions
             //   hasz=false  → no Z (altitude) dimension
             //   geodetic=true → geography/WGS-84, consistent with tgeogpoint_in
@@ -321,21 +299,18 @@ public class Query4_Main {
         /**
          * Applies paper Lines 2 and 4 for all events in one sliding window.
          *
-         * <p><b>Paper Line 2</b> — {@code tgeo_at_stbox(lon, lat, ts, stbox) == 1}:
+         * <p><b>Paper Line 2</b>: {@code tgeo_at_stbox(lon, lat, ts, stbox) == 1}:
          * <br>Each event is converted to a {@code tgeogpoint} instant and passed to
          * {@code tgeo_at_stbox}. The function returns:
          * <ul>
-         *   <li>{@code null} — the point is outside the STBox (spatially or temporally):
+         *   <li>{@code null} if the point is outside the STBox (spatially or temporally):
          *       the event is skipped.</li>
-         *   <li>a non-null {@code Pointer} — the point falls within the STBox: the event
+         *   <li>a non-null {@code Pointer} if the point falls within the STBox: the event
          *       contributes to the trajectory.</li>
          * </ul>
-         * This null-check replaces the {@code == 1} comparison used in Queries 1 and 2,
-         * because {@code tgeo_at_stbox} returns the restricted temporal object rather than
-         * an integer flag.
          *
-         * <p><b>Paper Line 4</b> — {@code temporal_sequence(lon, lat, ts)}:
-         * <br>Identical to Query 3: surviving events are sorted, concatenated into a sequence
+         * <p><b>Paper Line 4</b>: {@code temporal_sequence(lon, lat, ts)}:
+         * <br>surviving events are sorted, concatenated into a sequence
          * literal, parsed by {@code tgeogpoint_in}, and serialised via {@code tspatial_as_ewkt}.
          *
          * @param mmsi     vessel identifier (the key used by keyBy)
@@ -388,10 +363,10 @@ public class Query4_Main {
 
             if (surviving.isEmpty()) return; // no event survived the STBox filter
 
-            // Sort by timestamp — required by tgeogpoint_in for sequence construction.
+            // Sort by timestamp: required by tgeogpoint_in for sequence construction.
             surviving.sort((a, b) -> Long.compare(a.getTimestamp(), b.getTimestamp()));
 
-            // Paper Line 4: temporal_sequence(lon, lat, ts) — identical to Query 3.
+            // Paper Line 4: temporal_sequence(lon, lat, ts).
             StringBuilder seq = new StringBuilder("{");
             for (int i = 0; i < surviving.size(); i++) {
                 AISData event = surviving.get(i);

@@ -73,17 +73,6 @@ import functions.error_handler_fn;
  *   </li>
  * </ul>
  *
- * <p><b>tgeogpoint vs TGeomPointSeq (existing TrajectoryWindowFunction):</b>
- * <br>The existing {@code TrajectoryWindowFunction} in this project builds trajectories as
- * {@code TGeomPointSeq} (geometry, SRID=0) using the JMEOS high-level API. Query 3 uses
- * {@code tgeogpoint_in} (geography, SRID=4326) via the low-level MEOS bindings directly,
- * for two reasons:
- * <ul>
- *   <li>Consistency with Queries 1 and 2, which use geography types throughout.</li>
- *   <li>Geography sequences store coordinates on the WGS-84 ellipsoid, which is the correct
- *       reference frame for AIS/GPS data.</li>
- * </ul>
- *
  * <p><b>HOW TO RUN</b>
  * <br>In the Dockerfile, change the entrypoint from {@code aisdata.Main} to
  * {@code aisdata.Query3_Main}, then run:
@@ -102,10 +91,6 @@ import functions.error_handler_fn;
 public class Query3_Main {
 
     private static final Logger logger = LoggerFactory.getLogger(Query3_Main.class);
-
-    // -----------------------------------------------------------------------
-    // Entry point
-    // -----------------------------------------------------------------------
 
     public static void main(String[] args) throws Exception {
 
@@ -189,10 +174,6 @@ public class Query3_Main {
      * <p>Assembles the GPS instants in the window into a MobilityDB {@code tgeogpoint} sequence
      * and outputs it as a human-readable EWKT string. The sequence represents the vessel's trajectory over the
      * 10-second window, sampled at the AIS reporting rate (~1 message/second).
-     *
-     * <p>This is the low-level counterpart of the existing {@code TrajectoryWindowFunction},
-     * which uses the JMEOS high-level {@code TGeomPointSeq} API. Here we use
-     * {@code tgeogpoint_in} directly for geography-type consistency with Queries 1 and 2.
      */
     public static class TrajectoryCreationWindowFunction
             extends ProcessWindowFunction<AISData, String, Integer, TimeWindow> {
@@ -200,7 +181,6 @@ public class Query3_Main {
         private static final Logger log =
                 LoggerFactory.getLogger(TrajectoryCreationWindowFunction.class);
 
-        /** Re-initialised in {@link #open} — Pointer is not serialisable. */
         private transient error_handler_fn errorHandler;
 
         private static final DateTimeFormatter TIMESTAMP_FMT =
@@ -217,7 +197,7 @@ public class Query3_Main {
         }
 
         /**
-         * Assembles all GPS events in the window into a {@code tgeogpoint} sequence —
+         * Assembles all GPS events in the window into a {@code tgeogpoint} sequence:
          * the implementation of paper Line 3: {@code temporal_sequence(lon, lat, ts)}.
          *
          * <p>Steps:
@@ -232,10 +212,10 @@ public class Query3_Main {
          *   <li>Serialise back to EWKT via {@code tspatial_as_ewkt} and emit.</li>
          * </ol>
          *
-         * @param mmsi     vessel identifier (the key used by keyBy)
-         * @param context  window metadata (start/end timestamps)
-         * @param elements all AISData events in this (MMSI, window) pair
-         * @param out      collector for the trajectory EWKT string
+         * @param mmsi      vessel identifier (the key used by keyBy)
+         * @param context   window metadata (start/end timestamps)
+         * @param elements  all AISData events in this (MMSI, window) pair
+         * @param out       collector for the trajectory EWKT string
          */
         @Override
         public void process(
@@ -247,7 +227,7 @@ public class Query3_Main {
             String windowStart = millisToTimestamp(context.window().getStart());
             String windowEnd   = millisToTimestamp(context.window().getEnd());
 
-            // Step 1 — collect and sort by timestamp.
+            // Step 1: collect and sort by timestamp.
             // MEOS tgeogpoint_in requires instants in strictly increasing temporal order;
             // Flink does not guarantee arrival order within a window.
             List<AISData> sorted = new ArrayList<>();
@@ -256,10 +236,8 @@ public class Query3_Main {
 
             if (sorted.isEmpty()) return;
 
-            // Step 2 & 3 — build the sequence literal: {POINT(lon lat)@ts, ...}
-            // This is the WKT representation of a tgeogpoint TSequence (Linear interpolation
-            // is the default for point types, meaning positions between instants are
-            // linearly interpolated on the sphere).
+            // Step 2 & 3: build the sequence literal: {POINT(lon lat)@ts, ...}
+            // This is the WKT representation of a tgeogpoint TSequence
             StringBuilder seq = new StringBuilder("{");
             for (int i = 0; i < sorted.size(); i++) {
                 AISData event = sorted.get(i);
@@ -269,7 +247,7 @@ public class Query3_Main {
             }
             seq.append("}");
 
-            // Step 4 — parse the sequence into a native MEOS tgeogpoint pointer.
+            // Step 4: parse the sequence into a native MEOS tgeogpoint pointer.
             // tgeogpoint_in accepts both single instants ("POINT(lon lat)@ts") and sequences
             // ("{POINT(...)@ts,...}"). Here we always pass a sequence.
             Pointer trajectory = functions.tgeogpoint_in(seq.toString());
@@ -278,26 +256,24 @@ public class Query3_Main {
                 return;
             }
 
-            // Step 5 — serialise the MEOS pointer back to a human-readable WKT string.
+            // Step 5: serialise the MEOS pointer back to a human-readable WKT string.
             // tspatial_as_ewkt(pointer, maxdd) converts any temporal spatial type to EWKT
-            // (WKT with SRID prefix), producing human-readable "POINT(lon lat)@ts" output
-            // instead of the binary EWKB hex that tspatial_out emits for geography types.
-            // maxdd=6 gives 6 decimal places (~0.1 m precision at the equator).
+            // (WKT with SRID prefix), producing human-readable "POINT(lon lat)@ts" output.
+            // maxdd=6 gives 6 decimal places.
             String trajectoryWkt = functions.tspatial_as_ewkt(trajectory, 6);
 
             /*
-
-                // On a la séquence en mémoire
+                // We have this trajectory
                 Pointer trajectory = functions.tgeogpoint_in(seq.toString());
 
-                // On demande la position interpolée à un instant précis
+                // We could ask where was the vessel at a certain timestamp ? MEOS can interpolate the position based on
+                // the trajectory
                 Pointer tstz = functions.pg_timestamptz_in("2021-01-08 00:04:33+00", -1);
                 Pointer interpolated = functions.temporal_at_timestamptz(trajectory, tstz);
 
-                // interpolated est un TInstant avec la position calculée par interpolation linéaire
+                // interpolated is a TInstant which was computed by Linear Interpolation by default
                 String result = functions.tspatial_as_ewkt(interpolated, 6);
-                // → SRID=4326;POINT(9.97512 57.59214)@2021-01-08 00:04:33+00
-
+                // → SRID=4326;POINT(x.xxxxx xx.xxxxx)@2021-01-08 00:04:33+00
             */
 
             String output = String.format(
